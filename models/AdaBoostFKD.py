@@ -29,6 +29,8 @@ from sklearn.tree import DecisionTreeClassifier
 
 from models.LocalAdaBoost import LocalAdaBoost
 
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='sklearn')
 
 #For reproducibility, on top of a random_state, fix also a numpy seed (for dirichlet weights)
 
@@ -43,7 +45,8 @@ class AdaBoostFKD:
                  clients_classifier=DecisionTreeClassifier, clients_classifier_params={},
                  server_classifier=DecisionTreeClassifier, server_classifier_params={},
                  n_clients=5, public_data_prediction='majority_voting', server_alpha_weight_adj='common_abs',
-                 prediction_weights='only_server', T=10, data_distribution='iid', distribution_param=None,
+                 prediction_weights='only_server', client_weight_adj ='own',soft_predictions=False,temperature=1.0,T=10,
+                data_distribution='iid', distribution_param=None,
                  alpha_counter=3, random_state=0, adapt_client_weight=None, balanced_target_client_weight=False,
                  sample_public_data=False, attack_simulation=0.0):
         """
@@ -70,12 +73,19 @@ class AdaBoostFKD:
                 'only_server': The prediction for each client only uses server models with its weights to predict
                 'server_and_clients': The prediction for each client uses the server models and its own local models,
                     each with its corresponding weights.
+            client_weight_adj (str): It represents how the clients' weights are adapted during training. It can take the values:
+                'common': All clients' weights are adapted the same way, with the server alpha calculated with the server
+                error avg (given by server_alpha_weight_adj method).
+                'own': Each client's weights are adapted with the server alpha calculated with the error 
+                of the server model on its own data.
             adapt_client_weight (numpy.ndarray): It is a 1-d numpy array that takes values in (0,1). It represents
                 the scalar that will be multiplied to the clients weights if prediction_weights is 'server_and_clients'.
                 Must be of dimension n_clients. If no value is passed, it is set to (d_i/sum(d_i))_n by default,
                 where di is the number of data of client i.
             balanced_target_client_weight (bool): If True, it weights the adaptive client weights to unbalanced classes.
                 This way, clients with datasets with mostly one class label will not vote much into the FL prediction.
+            soft_predictions (bool): If True, it uses soft predictions (i.e., probabilities) instead of hard predictions (i.e., class labels).
+            temperature (float): Temperature parameter for softmax function. It is used to control the sharpness of the predictions.
             T (int): Number of communications (i.e., federated rounds) between clients and server.
             data_distribution (str): The way data is distributed between clients. It can take the values:
                 'iid': data is distributed i.i.d. between clients.
@@ -107,7 +117,10 @@ class AdaBoostFKD:
         self.public_data = public_data
         self.public_data_prediction = public_data_prediction
         self.server_alpha_weight_adj = server_alpha_weight_adj
+        self.client_weight_adj = client_weight_adj
         self.prediction_weights = prediction_weights
+        self.soft_predictions = soft_predictions
+        self.temperature = temperature
         self.T = T
         self.data_distribution = data_distribution
         self.distribution_param = distribution_param
@@ -230,45 +243,163 @@ class AdaBoostFKD:
         transform.fit(self.targets.reshape(-1, 1))
         self.transform = transform
 
-    def public_data_predict(self, arr):
+    def public_data_predict(self, arr, use_soft_proba=False):
         """
         Makes the prediction on the public dataset at the server side, via the ensemble knowledge distillation process,
             given the predictions of the clientes on the public data.
 
         Args:
-            arr (numpy.ndarray): 2-d array with n_clients rows and as many columns as instances has public_data. Each
-                row represents the predictions of a client.
+            arr: Input predictions from clients. Format depends on use_soft_proba:
+                - If use_soft_proba=False: 2-d array with shape (n_clients, n_samples). Each row 
+                  represents the hard label predictions of a client.
+                - If use_soft_proba=True: 3-d array with shape (n_clients, n_samples, n_classes). 
+                  Each element [i, :, :] represents the softmax probabilities from client i,
+                  already aligned to all classes via complete_log_proba and converted to 
+                  probabilities via log_proba_to_softmax.
+            use_soft_proba (bool): If False, arr contains hard labels. If True, arr contains 
+                softmax probabilities aligned to all classes. Default is False.
 
         Returns: 1-d array representing the labels assigned to public_data based on the clients' predictions.
         """
 
-        average_public_data_predict = np.zeros(arr.shape[1])
+        if use_soft_proba:
+            # arr has shape (n_clients, n_samples, n_classes)
+            n_samples = arr.shape[1]
+            average_public_data_predict = np.zeros(n_samples)
 
-        if self.public_data_prediction == 'majority_voting':
-            for i in range(self.n_clients):
-                unique, counts = np.unique(arr[:, i], return_counts=True)
-                average_public_data_predict[i] = unique[np.argmax(counts)]
-                # If two prediction were voted the same number of times it takes the one with smaller index
+            if self.public_data_prediction == 'majority_voting':
+                # aggregate probas, then convert soft probas to hard predictions
+                agg_probs = np.sum(arr,axis=0) #Shape (n_samples, n_classes)
+                average_public_data_predict = np.argmax(agg_probs, axis=1)  # Shape: (n_samples)
 
-        if self.public_data_prediction == 'weighted_majority_voting':
-            weighted_sum = np.zeros((arr.shape[1], self.domY))
-            for i in range(self.n_clients):
-                one_hot_prediction = self.transform.transform(arr[i].reshape(-1, 1))
-                weighted_sum = weighted_sum + (
-                        one_hot_prediction * self.number_data_clients[i]) / self.number_total_train_data
+            elif self.public_data_prediction == 'weighted_majority_voting':
+                # Aggregate softmax probabilities with client weights, then convert to hard labels
+                weighted_prob_sum = np.zeros((n_samples, self.domY))
+                for i in range(self.n_clients):
+                    client_weight = self.number_data_clients[i] / self.number_total_train_data
+                    weighted_prob_sum += arr[i] * client_weight
 
-            predicted_indices = weighted_sum.argmax(axis=1)
-            predicted_labels = np.zeros((arr.shape[1], self.domY))
-            predicted_labels[np.arange(arr.shape[1]), predicted_indices] = 1
-            average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
+                predicted_indices = weighted_prob_sum.argmax(axis=1)
+                predicted_labels = np.zeros((n_samples, self.domY))
+                predicted_labels[np.arange(n_samples), predicted_indices] = 1
+                average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
+
+        else:
+            # Original hard label logic
+            #arr has shape (n_clients, n_samples)
+            average_public_data_predict = np.zeros(arr.shape[1])
+
+            if self.public_data_prediction == 'majority_voting':
+                for i in range(arr.shape[1]):
+                    unique, counts = np.unique(arr[:, i], return_counts=True)
+                    average_public_data_predict[i] = unique[np.argmax(counts)]
+                    # If two predictions were voted the same number of times it takes the one with smaller index
+
+            elif self.public_data_prediction == 'weighted_majority_voting':
+                weighted_sum = np.zeros((arr.shape[1], self.domY))
+                for i in range(self.n_clients):
+                    one_hot_prediction = self.transform.transform(arr[i].reshape(-1, 1))
+                    weighted_sum = weighted_sum + (
+                            one_hot_prediction * self.number_data_clients[i]) / self.number_total_train_data
+
+                predicted_indices = weighted_sum.argmax(axis=1)
+                predicted_labels = np.zeros((arr.shape[1], self.domY))
+                predicted_labels[np.arange(arr.shape[1]), predicted_indices] = 1
+                average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
 
         return average_public_data_predict
-
-    def client_weight_adjustment(self, i, j):
+    
+    def log_proba_to_softmax(self, log_proba, temperature=1.0):
         """
-        It calculates the error made by the server model and the client's j model at round i on client's j training data. It
-        also reweights client's j weights according to an alpha (calculated in a similar manner to that of AdaBoost algorithm),
-        that depends on the server error.
+        Converts log probabilities to softmax probabilities with temperature scaling.
+        
+        The temperature parameter controls the "softness" of the probability distribution:
+        - temperature < 1.0: sharper distribution (more confident predictions)
+        - temperature = 1.0: standard softmax (original probabilities)
+        - temperature > 1.0: softer distribution (more uniform, less confident)
+        
+        This is useful for knowledge distillation where softer targets can provide
+        more information about the relationships between classes.
+        
+        Note: -inf values (unseen classes) will result in probability 0 after softmax,
+        as exp(-inf) = 0. The relative magnitudes between finite values are preserved
+        since softmax is shift-invariant.
+        
+        Args:
+            log_proba (numpy.ndarray): 2-d array of shape (n_samples, n_classes) containing 
+                complete log probabilities (with -inf for unseen classes).
+            temperature (float): Temperature parameter for softmax scaling. Default is 1.0.
+        
+        Returns:
+            soft_proba (numpy.ndarray): 2-d array of shape (n_samples, n_classes) with 
+                softmax probabilities. Each row sums to 1.
+        """
+        # Scale log probabilities by temperature
+        scaled_log_proba = log_proba / temperature
+        
+        # For numerical stability, subtract max of FINITE values only
+        # This prevents overflow while preserving relative magnitudes
+        # (softmax is shift-invariant: softmax(x) = softmax(x - c))
+        finite_mask = np.isfinite(scaled_log_proba)
+        max_finite = np.where(
+            finite_mask, 
+            scaled_log_proba, 
+            -np.inf
+        ).max(axis=1, keepdims=True)
+        
+        # Handle edge case where all values are -inf (set max to 0)
+        max_finite = np.where(np.isinf(max_finite), 0.005, max_finite)
+        
+        # Compute exp(scaled - max)
+        # Note: exp(-inf - anything) = exp(-inf) = 0, so -inf correctly becomes 0
+        exp_proba = np.exp(scaled_log_proba - max_finite)
+        
+        # Normalize to get probabilities
+        soft_proba = exp_proba / exp_proba.sum(axis=1, keepdims=True)
+        
+        return soft_proba
+
+    def complete_log_proba(self, log_proba, model_classes, total_classes=None):
+        """
+        Completes an incomplete log_proba prediction by adding log(0) = -inf for unseen classes.
+        
+        This is useful when models are trained on different subsets of classes. The log_proba array
+        returned by the model only contains probabilities for classes it has seen. This function
+        extends it to include all possible classes with log(0) = -inf for unseen classes.
+        
+        Args:
+            log_proba (numpy.ndarray): 2-d array of shape (n_samples, n_model_classes) containing 
+                log probabilities from the model for its trained classes.
+            model_classes (numpy.ndarray or list): 1-d array/list of class labels the model was trained on.
+                These are typically obtained via model.classes_.
+            total_classes (numpy.ndarray or list, optional): 1-d array/list of all possible class labels.
+                If None, defaults to self.transform.categories_[0] (all classes seen during fit).
+        
+        Returns:
+            complete_log_proba (numpy.ndarray): 2-d array of shape (n_samples, n_total_classes) with 
+                log probabilities for all classes. Unseen classes have log(0) = -inf.
+        """
+        if total_classes is None:
+            total_classes = self.transform.categories_[0]
+        
+        n_samples = log_proba.shape[0]
+        n_total_classes = len(total_classes)
+        
+        # Initialize with -inf for all classes
+        complete_log_proba = np.full((n_samples, n_total_classes), -np.inf)
+        
+        # Create a mapping from class label to index in total_classes
+        # This handles unsorted model_classes correctly
+        total_classes_list = list(total_classes)
+        for i, model_class in enumerate(model_classes):
+            idx = total_classes_list.index(model_class)
+            complete_log_proba[:, idx] = log_proba[:, i]
+        
+        return complete_log_proba
+
+    def client_error_calculation(self, i, j):
+        """
+        It calculates the error made by the server model and the client's j model at round i on client's j training data. 
 
         Args:
             i (int): Round
@@ -277,9 +408,9 @@ class AdaBoostFKD:
         Returns:
             server_err (float): error made by the server model at round i on client's j training data.
             client_err (float): error made by the client's j model at round i on client's j training data.
-            (X_train, y_train) (tuple of np.arrays): Tuple of 2d and 1d arrays representing client's j
-            training data with its weights actualized.
             alpha (float): float used to update client's j training data weights. Depends on server_err. 
+            server_filter (np.array): Boolean array indicating which instances were correctly predicted by the server model
+            for client j.
         """
         if False: # j in self.attackers:
             # Says that the server model makes a great error on its data; its own model makes no error on its data
@@ -312,12 +443,37 @@ class AdaBoostFKD:
                 alpha = 0
 
             # If err is greater than threshold, then alpha changes signs and messes the weight actualization
-            if (server_err < 1 - (1 / self.domY)) and (server_err != 0):
+            #if (server_err < 1 - (1 / self.domY)) and (server_err != 0):
+            #    # When it predicts correctly, weights are not modified
+            #    # When it predicts wrongly, weights are increased
+            #    X_train[~server_filter, -1] = X_train[~server_filter, -1] * math.exp(alpha)
+
+            return server_err, client_err, alpha,server_filter
+        
+    def client_weight_adjustment(self, j,alpha,server_filter,server_err):
+        '''
+        It reweights client's j weights according to an alpha (calculated in a similar manner to that of AdaBoost algorithm),
+        that depends on the server error.
+        
+        Args:
+        param j: Client number or id
+        param alpha: float used to update client's j training data weights. Depends on server_err. It can either be the common
+        alpha for all clients, or the own alpha of client j.
+        param server_filter: np.array: Boolean array indicating which instances were correctly predicted by the server model
+        for client j.
+        param server_err: error made by the server model used to calculate alpha.
+
+        returns:
+        (X_train, y_train) (tuple of np.arrays): Tuple of 2d and 1d arrays representing client's j
+            training data with its weights actualized.
+        '''
+        X_train, y_train = self.train_clients_data[j]
+
+        if (server_err < 1 - (1 / self.domY)) and (server_err != 0):
                 # When it predicts correctly, weights are not modified
                 # When it predicts wrongly, weights are increased
                 X_train[~server_filter, -1] = X_train[~server_filter, -1] * math.exp(alpha)
-
-            return server_err, client_err, (X_train, y_train), alpha
+        return (X_train,y_train)
 
     def server_alpha_weight_adjustment(self, err_arr):
         """
@@ -351,7 +507,7 @@ class AdaBoostFKD:
         else:
             alpha = 0
 
-        return alpha
+        return alpha,server_err
 
     def fitmodel(self):
         """
@@ -393,7 +549,10 @@ class AdaBoostFKD:
                 # Use the whole public data each iteration
                 curr_public_data = self.public_data
 
-            predicted_public_data = np.zeros((self.n_clients, curr_public_data.shape[0]))
+            if self.soft_predictions:
+                predicted_public_data = np.zeros((self.n_clients, curr_public_data.shape[0], self.domY))
+            else:
+                predicted_public_data = np.zeros((self.n_clients, curr_public_data.shape[0]))
 
             # CLIENTS SIDE
             for j in range(self.n_clients):
@@ -427,13 +586,21 @@ class AdaBoostFKD:
                     model.fit(X_train_no_weight, y_train_no_weight)
 
                 # Get predictions over public unlabeled data
-                predicted_public_data[j, :] = model.predict(curr_public_data)
+                if self.soft_predictions:
+                    log_proba= model.predict_log_proba(curr_public_data)
+                    #print(log_proba)
+                    complete_log_proba = self.complete_log_proba(log_proba, model.classes_)
+                    #print(complete_log_proba)
+                    predicted_public_data[j, :, :] = self.log_proba_to_softmax(complete_log_proba,temperature=self.temperature)
+                    #print(predicted_public_data[j, :, :])
+                else:
+                    predicted_public_data[j, :] = model.predict(curr_public_data)
 
                 self.models_dict[j][i] = model
 
             # SERVER SIDE
             # Get aggregated predictions over public dataset
-            voted_public_data_labels = self.public_data_predict(predicted_public_data)
+            voted_public_data_labels = self.public_data_predict(predicted_public_data,use_soft_proba=self.soft_predictions)
 
             # Create and build model at the server side over the public dataset
             params = self.server_classifier_params
@@ -446,16 +613,24 @@ class AdaBoostFKD:
             # Compute error of the server model at both server's and clients' side
             server_err_arr = np.zeros(self.n_clients)
             clients_err_arr = np.zeros(self.n_clients)
+            server_filter = {j:None for j in range(self.n_clients)}
             for j in range(self.n_clients):
-                server_err, client_err, self.train_clients_data[j], own_client_alpha = \
-                    self.client_weight_adjustment(i, j)
+                server_err, client_err, own_client_alpha,server_filter[j] = \
+                    self.client_error_calculation(i, j)
                 server_err_arr[j] = server_err
                 clients_err_arr[j] = client_err
                 # Clients own alpha with its data and client model
                 self.own_server_model_weights[i, j] = own_client_alpha
 
             # shared alpha weights for all clients (mean of errors of server model predicting client data)
-            alpha = self.server_alpha_weight_adjustment(server_err_arr)
+            alpha,aggregated_server_error = self.server_alpha_weight_adjustment(server_err_arr)
+            if self.client_weight_adj == 'common':
+                for j in range(self.n_clients):    
+                    self.train_clients_data[j] = self.client_weight_adjustment(j,alpha,server_filter[j],aggregated_server_error)
+            elif self.client_weight_adj == 'own':
+                for j in range(self.n_clients):    
+                    client_alpha = self.own_server_model_weights[i, j]
+                    self.train_clients_data[j] = self.client_weight_adjustment(j,client_alpha,server_filter[j],server_err_arr[j])
 
             # To avoid division by 0 and get a high value of alpha.
             clients_err_arr[clients_err_arr == 0] = 0.005
