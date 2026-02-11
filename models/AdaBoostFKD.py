@@ -286,7 +286,6 @@ class AdaBoostFKD:
 
         else:
             # Original hard label logic
-            #arr has shape (n_clients, n_samples)
             average_public_data_predict = np.zeros(arr.shape[1])
 
             if self.public_data_prediction == 'majority_voting':

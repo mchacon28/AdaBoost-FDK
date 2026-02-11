@@ -110,7 +110,7 @@ class LocalAdaBoost():
             # When it predicts wrongly, weight is increased
             X_data[~filter, -1] = X_data[~filter, -1] * math.exp(alpha)
 
-    def predict(self, data):
+    def predict(self, data, soft_predictions=False):
         """
         Predict class labels for input data, using the previously trained AdaBoost model.
         It uses both the base models and their weights.
@@ -121,15 +121,19 @@ class LocalAdaBoost():
         Return: Array of predicted class labels
         """
         weighted_sum = np.zeros((data.shape[0], self.domY))
-
+        sum_of_weights = 0
         # Get weighted sum of predictions
         for key, model in self.models_dict.items():
             prediction = model.predict(data)
             OneHotprediction = self.transform.transform(prediction.reshape(-1, 1))
             weighted_sum = weighted_sum + OneHotprediction * self.model_weights[key]
+            sum_of_weights += self.model_weights[key]
 
-        predicted_indices = weighted_sum.argmax(axis=1)
-        predicted_labels = np.zeros((data.shape[0], self.domY))
-        predicted_labels[np.arange(data.shape[0]), predicted_indices] = 1
+        if soft_predictions:
+            return weighted_sum / sum_of_weights
+        else:
+            predicted_indices = weighted_sum.argmax(axis=1)
+            predicted_labels = np.zeros((data.shape[0], self.domY))
+            predicted_labels[np.arange(data.shape[0]), predicted_indices] = 1
 
-        return self.transform.inverse_transform(predicted_labels).flatten()
+            return self.transform.inverse_transform(predicted_labels).flatten()
