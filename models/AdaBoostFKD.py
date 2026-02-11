@@ -286,6 +286,7 @@ class AdaBoostFKD:
 
         else:
             # Original hard label logic
+            #arr has shape (n_clients, n_samples)
             average_public_data_predict = np.zeros(arr.shape[1])
 
             if self.public_data_prediction == 'majority_voting':
@@ -674,7 +675,7 @@ class AdaBoostFKD:
                 model.fit(X_train[:, :-1], y_train)
                 self.local_clients_models_dict[i] = model
 
-    def predict_data(self, data, server_weights, i=None):
+    def predict_data(self, data, server_weights, i=None, soft_predictions=False):
         """
         A method that makes the prediction associated with client i of the data given using server_weights array as the
         server weights for the prediction.
@@ -689,13 +690,13 @@ class AdaBoostFKD:
         """
         # array with as many rows as the number of data, and as many columns as targets array
         weighted_sum = np.zeros((data.shape[0], self.domY))
-
+        sum_of_weights = 0
         if self.prediction_weights == 'only_server':
             for key, model in self.models_dict['server'].items():
                 prediction = model.predict(data)
                 one_hot_prediction = self.transform.transform(prediction.reshape(-1, 1))
                 weighted_sum = weighted_sum + one_hot_prediction * server_weights[key]
-
+                sum_of_weights += server_weights[key]
         elif self.prediction_weights == 'server_and_clients':
             for key, model in self.models_dict['server'].items():
                 server_prediction = model.predict(data)
@@ -705,14 +706,17 @@ class AdaBoostFKD:
                 weighted_sum = weighted_sum + server_one_hot_prediction * server_weights[key]
                 weighted_sum = weighted_sum + client_one_hot_prediction * (
                         self.clients_model_weights[key, i] * self.adapt_client_weight[i])
+                sum_of_weights += server_weights[key] + self.clients_model_weights[key, i] * self.adapt_client_weight[i]
+        if soft_predictions:
+            return weighted_sum / sum_of_weights
+        else:
+            predicted_indices = weighted_sum.argmax(axis=1)
+            predicted_labels = np.zeros((data.shape[0], self.domY))
+            predicted_labels[np.arange(data.shape[0]), predicted_indices] = 1
 
-        predicted_indices = weighted_sum.argmax(axis=1)
-        predicted_labels = np.zeros((data.shape[0], self.domY))
-        predicted_labels[np.arange(data.shape[0]), predicted_indices] = 1
+            return self.transform.inverse_transform(predicted_labels).flatten()
 
-        return self.transform.inverse_transform(predicted_labels).flatten()
-
-    def client_predict_data(self, data, i):
+    def client_predict_data(self, data, i, soft_predictions=False):
         """
         Predicts the labels of data associated with client i. Unlike self.predict_data, this method internally
         handdles which server_weights to choose.
@@ -725,15 +729,15 @@ class AdaBoostFKD:
         """
         if (self.server_alpha_weight_adj == 'common_abs') or (self.server_alpha_weight_adj == 'common_weighted'):
             if self.prediction_weights == 'only_server':
-                predicted_data = self.predict_data(data, self.server_models_weights)
+                predicted_data = self.predict_data(data, self.server_models_weights, soft_predictions=soft_predictions)
             elif self.prediction_weights == 'server_and_clients':
-                predicted_data = self.predict_data(data, self.server_models_weights, i)
+                predicted_data = self.predict_data(data, self.server_models_weights, i, soft_predictions=soft_predictions)
         elif self.server_alpha_weight_adj == 'own':
             weights = self.own_server_model_weights[:, i]
-            predicted_data = self.predict_data(data, weights, i)
+            predicted_data = self.predict_data(data, weights, i, soft_predictions=soft_predictions)
         elif (self.server_alpha_weight_adj == 'avg_abs') or (self.server_alpha_weight_adj == 'avg_weighted'):
             weights = (self.own_server_model_weights[:, i] + self.server_models_weights) / 2
-            predicted_data = self.predict_data(data, weights, i)
+            predicted_data = self.predict_data(data, weights, i, soft_predictions=soft_predictions)
 
         return predicted_data
 
