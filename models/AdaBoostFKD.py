@@ -22,7 +22,7 @@ from flex.data import FedDataDistribution, FedDatasetConfig, Dataset
 import numpy as np
 import pandas as pd
 import random
-from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.tree import DecisionTreeClassifier
@@ -1023,55 +1023,94 @@ class AdaBoostFKD:
         Returns: Dataframe with a row for each client and columns:
             - acc_global (float): average of every clients' accuracy score result on X_global data. 
             - f1w_global (float): average of every clients' f1 (weighted average) score result on X_global data.
+            - rocw_global (float): average of every clients' roc_auc (weighted average) score result on X_global data.
             - acc_local (float): average of every clients' accuracy score result on its own test data.
             - f1w_local (float): average of every clients' f1 (weighted average) score result on its own test data.
+            - rocw_local (float): average of every clients' roc_auc (weighted average) score result on its own test data.
             If macro_f1 is set to True, it also returns:
             - f1ma_global (float): average of every clients' f1 (macro average) score result on X_global data.
+            - rocma_global (float): average of every clients' roc_auc (macro average) score result on X_global data.
             - f1ma_local (float): average of every clients' f1 (macro average) score result on its own test data.
+            - rocma_local (float): average of every clients' roc_auc (macro average) score result on its own test data.
         """
         FL_acc_own_data_wf1 = np.zeros(self.n_clients)
         FL_acc_global_data_wf1 = np.zeros(self.n_clients)
         FL_acc_own_data_acc = np.zeros(self.n_clients)
         FL_acc_global_data_acc = np.zeros(self.n_clients)
+        FL_acc_own_data_wroc = np.zeros(self.n_clients)
+        FL_acc_global_data_wroc = np.zeros(self.n_clients)
 
         if macro_f1:
             FL_acc_own_data_maf1 = np.zeros(self.n_clients)
             FL_acc_global_data_maf1 = np.zeros(self.n_clients)
+            FL_acc_own_data_maroc = np.zeros(self.n_clients)
+            FL_acc_global_data_maroc = np.zeros(self.n_clients)
 
         for i in range(self.n_clients):
             if i not in self.attackers:
                 own_data_Xtest, own_data_ytest = self.test_clients_data[i]
+                
+                
+                # Predictions for Accuracy and F1 (Hard labels)
+                y_pred_own = self.client_predict_data(own_data_Xtest[:, :-1], i)
+                y_pred_global = self.client_predict_data(X_global, i)
 
-                FL_acc_own_data_wf1[i] = f1_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest,
+                
+                # Predictions for ROC AUC (Soft probabilities)
+                y_prob_own = self.client_predict_data(own_data_Xtest[:, :-1], i, soft_predictions=True)
+                y_prob_global = self.client_predict_data(X_global, i, soft_predictions=True)
+
+                if y_prob_own.shape[1] == 2:
+                    y_prob_own = y_prob_own[:, 1]
+                    y_prob_global = y_prob_global[:, 1]
+                
+                FL_acc_own_data_wf1[i] = f1_score(y_pred_own, own_data_ytest,
                                                 labels=np.unique(own_data_ytest), average='weighted', zero_division=0.0)
-                FL_acc_global_data_wf1[i] = f1_score(self.client_predict_data(X_global, i), y_global,
+                FL_acc_global_data_wf1[i] = f1_score(y_pred_global, y_global,
                                                     labels=np.unique(y_global), average='weighted', zero_division=0.0)
-                FL_acc_global_data_acc[i] = accuracy_score(self.client_predict_data(X_global, i), y_global)
-                FL_acc_own_data_acc[i] = accuracy_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest)
+                FL_acc_global_data_acc[i] = accuracy_score(y_pred_global, y_global)
+                FL_acc_own_data_acc[i] = accuracy_score(y_pred_own, own_data_ytest)
+
+                
+                FL_acc_own_data_wroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='weighted')
+                
+                FL_acc_global_data_wroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='weighted')
 
                 if macro_f1:
-                    FL_acc_own_data_maf1[i] = f1_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest,
+                    FL_acc_own_data_maf1[i] = f1_score(y_pred_own, own_data_ytest,
                                                     labels=np.unique(own_data_ytest), average='macro', zero_division=0.0)
-                    FL_acc_global_data_maf1[i] = f1_score(self.client_predict_data(X_global, i), y_global,
+                    FL_acc_global_data_maf1[i] = f1_score(y_pred_global, y_global,
                                                         labels=np.unique(y_global), average='macro', zero_division=0.0)
+                    
+                    FL_acc_own_data_maroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='macro')
+                    FL_acc_global_data_maroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='macro')
+
             else:
                 FL_acc_own_data_wf1[i] = np.nan
                 FL_acc_global_data_wf1[i] = np.nan
                 FL_acc_global_data_acc[i] = np.nan
                 FL_acc_own_data_acc[i] = np.nan
+                FL_acc_own_data_wroc[i] = np.nan
+                FL_acc_global_data_wroc[i] = np.nan
 
                 if macro_f1:
                     FL_acc_own_data_maf1[i] = np.nan
                     FL_acc_global_data_maf1[i] = np.nan
+                    FL_acc_own_data_maroc[i] = np.nan
+                    FL_acc_global_data_maroc[i] = np.nan
 
-        acc_global = np.nanmean(FL_acc_global_data_acc) # FL_acc_global_data_acc.mean()
-        acc_local = np.nanmean(FL_acc_own_data_acc) # FL_acc_own_data_acc.mean()
-        f1w_global = np.nanmean(FL_acc_global_data_wf1) # FL_acc_global_data_wf1.mean()
-        f1w_local = np.nanmean(FL_acc_own_data_wf1) # FL_acc_own_data_wf1.mean()
+        acc_global = np.nanmean(FL_acc_global_data_acc)
+        acc_local = np.nanmean(FL_acc_own_data_acc)
+        f1w_global = np.nanmean(FL_acc_global_data_wf1)
+        f1w_local = np.nanmean(FL_acc_own_data_wf1)
+        rocw_global = np.nanmean(FL_acc_global_data_wroc)
+        rocw_local = np.nanmean(FL_acc_own_data_wroc)
 
         if macro_f1:
-            f1ma_global = np.nanmean(FL_acc_global_data_maf1) # FL_acc_global_data_maf1.mean()
-            f1ma_local = np.nanmean(FL_acc_own_data_maf1) # FL_acc_own_data_maf1.mean()
-            return acc_global, f1w_global, f1ma_global, acc_local, f1w_local, f1ma_local
+            f1ma_global = np.nanmean(FL_acc_global_data_maf1)
+            f1ma_local = np.nanmean(FL_acc_own_data_maf1)
+            rocma_global = np.nanmean(FL_acc_global_data_maroc)
+            rocma_local = np.nanmean(FL_acc_own_data_maroc)
+            return acc_global, f1w_global, f1ma_global, rocw_global, rocma_global, acc_local, f1w_local, f1ma_local, rocw_local, rocma_local
         else:
-            return acc_global, f1w_global, acc_local, f1w_local
+            return acc_global, f1w_global, rocw_global, acc_local, f1w_local, rocw_local
