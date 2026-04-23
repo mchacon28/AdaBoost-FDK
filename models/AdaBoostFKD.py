@@ -1072,7 +1072,7 @@ class AdaBoostFKD:
                 FL_acc_own_data_acc[i] = accuracy_score(y_pred_own, own_data_ytest)
 
                 
-                FL_acc_own_data_wroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='weighted', labels=np.unique(y_global))
+                FL_acc_own_data_wroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='weighted', labels=np.unique(own_data_ytest))
                 
                 FL_acc_global_data_wroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='weighted', labels=np.unique(y_global))
 
@@ -1082,7 +1082,7 @@ class AdaBoostFKD:
                     FL_acc_global_data_maf1[i] = f1_score(y_pred_global, y_global,
                                                         labels=np.unique(y_global), average='macro', zero_division=0.0)
                     
-                    FL_acc_own_data_maroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='macro', labels=np.unique(y_global))
+                    FL_acc_own_data_maroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='macro', labels=np.unique(own_data_ytest))
                     FL_acc_global_data_maroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='macro', labels=np.unique(y_global))
 
             else:
