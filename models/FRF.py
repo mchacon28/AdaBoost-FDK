@@ -209,20 +209,20 @@ def evaluate_global_rf_model2(server_flex_model, test_data, macro=False, *args, 
             y_pred_proba = y_pred_proba[:, 1]
 
         acc_score = accuracy_score(y_test_local, y_pred)
-        f1w_score = f1_score(y_test_local, y_pred, labels=np.unique(y_test_local), average='weighted',
+        f1w_score = f1_score(y_test_local, y_pred, labels=np.unique(y_global_test), average='weighted',
                              zero_division=0.0)
         AUCw_score = roc_auc_score(y_test_local, y_pred_proba, multi_class='ovr', average='weighted', 
-                                labels=np.unique(y_test_local))
+                                labels=np.unique(y_global_test))
 
         acc_scores[i] = acc_score
         f1w_scores[i] = f1w_score
         AUCw_scores[i] = AUCw_score
 
         if macro:
-            f1ma_scores[i] = f1_score(y_test_local, y_pred, labels=np.unique(y_test_local), average='macro',
+            f1ma_scores[i] = f1_score(y_test_local, y_pred, labels=np.unique(y_global_test), average='macro',
                              zero_division=0.0)
             AUCma_scores[i] = roc_auc_score(y_test_local, y_pred_proba, multi_class='ovr', average='macro', 
-                                labels=np.unique(y_test_local))
+                                labels=np.unique(y_global_test))
 
     acc_local = acc_scores.mean()
     f1w_local = f1w_scores.mean()

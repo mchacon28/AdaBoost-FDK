@@ -672,7 +672,7 @@ class AdaBoostFKD:
                 #The number of estimators is 2T so that the clients on local and with server have the same amount of models.
                 model = LocalAdaBoost(n_estimators=self.T * 2,classifier=self.clients_classifier,
                                     params=self.clients_classifier_params, random_state=seed)
-                model.fit(X_train[:, :-1], y_train)
+                model.fit(X_train[:, :-1], y_train, self.domY)
                 self.local_clients_models_dict[i] = model
 
     def predict_data(self, data, server_weights, i=None, soft_predictions=False):
@@ -865,27 +865,27 @@ class AdaBoostFKD:
                 local_model = self.local_clients_models_dict[i]
 
                 FL_wf1_own_data[i] = f1_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest,
-                                            labels=np.unique(own_data_ytest), average='weighted', zero_division=0.0)
+                                            labels=list(range(self.domY)), average='weighted', zero_division=0.0)
                 FL_wf1_global_data[i] = f1_score(self.client_predict_data(X_global, i), y_global,
-                                                labels=np.unique(y_global), average='weighted', zero_division=0.0)
+                                                labels=list(range(self.domY)), average='weighted', zero_division=0.0)
 
                 local_wf1_own_data[i] = f1_score(local_model.predict(own_data_Xtest[:, :-1]), own_data_ytest,
-                                                labels=np.unique(own_data_ytest), average='weighted', zero_division=0.0)
+                                                labels=list(range(self.domY)), average='weighted', zero_division=0.0)
                 local_wf1_global_data[i] = f1_score(local_model.predict(X_global), y_global,
-                                                labels=np.unique(y_global), average='weighted', zero_division=0.0)
+                                                labels=list(range(self.domY)), average='weighted', zero_division=0.0)
 
                 global_difference_w[i] = FL_wf1_global_data[i] - local_wf1_global_data[i]
                 local_difference_w[i] = FL_wf1_own_data[i] - local_wf1_own_data[i]
 
                 if macro_f1:
                     FL_maf1_own_data[i] = f1_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest,
-                                                labels=np.unique(own_data_ytest), average='macro', zero_division=0.0)
+                                                labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     FL_maf1_global_data[i] = f1_score(self.client_predict_data(X_global, i), y_global,
-                                                    labels=np.unique(y_global), average='macro', zero_division=0.0)
+                                                    labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     local_maf1_own_data[i] = f1_score(local_model.predict(own_data_Xtest[:, :-1]), own_data_ytest,
-                                                    labels=np.unique(own_data_ytest), average='macro', zero_division=0.0)
+                                                    labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     local_maf1_global_data[i] = f1_score(local_model.predict(X_global), y_global,
-                                                        labels=np.unique(y_global), average='macro', zero_division=0.0)
+                                                        labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     global_difference_ma[i] = FL_maf1_global_data[i] - local_maf1_global_data[i]
                     local_difference_ma[i] = FL_maf1_own_data[i] - local_maf1_own_data[i]
             else:
@@ -923,6 +923,7 @@ class AdaBoostFKD:
                  'local_wf1_own_data': local_wf1_own_data, 'local_wf1_global_data': local_wf1_global_data,
                  'local_difference_w': local_difference_w, 'global_difference_w': global_difference_w}
             )
+
 
     def overall_AUC_score(self, X_global, y_global, macro_AUC=False):
         """
@@ -968,7 +969,7 @@ class AdaBoostFKD:
                 fl_prob_global = self.client_predict_data(X_global, i, soft_predictions=True)
                 local_prob_own = local_model.predict(own_data_Xtest[:, :-1], soft_predictions=True)
                 local_prob_global = local_model.predict(X_global, soft_predictions=True)
-                
+
                 if fl_prob_own.shape[1] == 2:
                     fl_prob_own = fl_prob_own[:, 1]
                     fl_prob_global = fl_prob_global[:, 1]
@@ -977,11 +978,14 @@ class AdaBoostFKD:
                     local_prob_global = local_prob_global[:, 1]
 
                 FL_wAUC_own_data[i] = roc_auc_score(own_data_ytest, fl_prob_own, 
-                                        multi_class='ovr', average='weighted', labels=np.unique(own_data_ytest))
+                                        multi_class='ovr', average='weighted', labels=list(range(self.domY)))
                                     # f1_score(self.client_predict_data(own_data_Xtest[:, :-1], i), own_data_ytest,
                                     #         labels=np.unique(own_data_ytest), average='weighted', zero_division=0.0)
                 FL_wAUC_global_data[i] = roc_auc_score(y_global, fl_prob_global, 
-                                            multi_class='ovr', average='weighted', labels=np.unique(y_global))
+                                            multi_class='ovr', average='weighted', labels=list(range(self.domY)))
+
+                
+
 
                 if np.isnan(local_prob_own).any() or np.isnan(local_prob_global).any():
                     local_wAUC_own_data[i] = np.nan
@@ -993,19 +997,19 @@ class AdaBoostFKD:
 
                 else:
                     local_wAUC_own_data[i] = roc_auc_score(own_data_ytest, local_prob_own, 
-                                                multi_class='ovr', average='weighted', labels=np.unique(own_data_ytest))
+                                                multi_class='ovr', average='weighted', labels=list(range(self.domY)))
 
                     local_wAUC_global_data[i] = roc_auc_score(y_global, local_prob_global, 
-                                                    multi_class='ovr', average='weighted', labels=np.unique(y_global))
+                                                    multi_class='ovr', average='weighted', labels=list(range(self.domY)))
 
                     global_difference_w[i] = FL_wAUC_global_data[i] - local_wAUC_global_data[i]
                     local_difference_w[i] = FL_wAUC_own_data[i] - local_wAUC_own_data[i]
 
                 if macro_AUC:
                     FL_maAUC_own_data[i] = roc_auc_score(own_data_ytest, fl_prob_own, 
-                                        multi_class='ovr', average='macro', labels=np.unique(own_data_ytest))
+                                        multi_class='ovr', average='macro', labels=list(range(self.domY)))
                     FL_maAUC_global_data[i] = roc_auc_score(y_global, fl_prob_global, 
-                                                multi_class='ovr', average='macro', labels=np.unique(y_global))
+                                                multi_class='ovr', average='macro', labels=list(range(self.domY)))
 
                     if np.isnan(local_prob_own).any() or np.isnan(local_prob_global).any():
                         local_wAUC_own_data[i] = np.nan
@@ -1016,10 +1020,10 @@ class AdaBoostFKD:
                         local_difference_w[i] = np.nan
                     else:
                         local_maAUC_own_data[i] = roc_auc_score(own_data_ytest, local_prob_own, 
-                                                    multi_class='ovr', average='macro', labels=np.unique(own_data_ytest))
+                                                    multi_class='ovr', average='macro', labels=list(range(self.domY)))
 
                         local_maAUC_global_data[i] = roc_auc_score(y_global, local_prob_global, 
-                                                    multi_class='ovr', average='macro', labels=np.unique(y_global))
+                                                    multi_class='ovr', average='macro', labels=list(range(self.domY)))
                         global_difference_ma[i] = FL_maAUC_global_data[i] - local_maAUC_global_data[i]
                         local_difference_ma[i] = FL_maAUC_own_data[i] - local_maAUC_own_data[i]
             else:
@@ -1199,25 +1203,24 @@ class AdaBoostFKD:
                     y_prob_global = y_prob_global[:, 1]
                 
                 FL_acc_own_data_wf1[i] = f1_score(y_pred_own, own_data_ytest,
-                                                labels=np.unique(own_data_ytest), average='weighted', zero_division=0.0)
+                                                labels=list(range(self.domY)), average='weighted', zero_division=0.0)
                 FL_acc_global_data_wf1[i] = f1_score(y_pred_global, y_global,
-                                                    labels=np.unique(y_global), average='weighted', zero_division=0.0)
+                                                    labels=list(range(self.domY)), average='weighted', zero_division=0.0)
                 FL_acc_global_data_acc[i] = accuracy_score(y_pred_global, y_global)
                 FL_acc_own_data_acc[i] = accuracy_score(y_pred_own, own_data_ytest)
 
+                FL_acc_own_data_wroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='weighted', labels=list(range(self.domY)))
                 
-                FL_acc_own_data_wroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='weighted', labels=np.unique(own_data_ytest))
-                
-                FL_acc_global_data_wroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='weighted', labels=np.unique(y_global))
+                FL_acc_global_data_wroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='weighted', labels=list(range(self.domY)))
 
                 if macro_f1:
                     FL_acc_own_data_maf1[i] = f1_score(y_pred_own, own_data_ytest,
-                                                    labels=np.unique(own_data_ytest), average='macro', zero_division=0.0)
+                                                    labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     FL_acc_global_data_maf1[i] = f1_score(y_pred_global, y_global,
-                                                        labels=np.unique(y_global), average='macro', zero_division=0.0)
+                                                        labels=list(range(self.domY)), average='macro', zero_division=0.0)
                     
-                    FL_acc_own_data_maroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='macro', labels=np.unique(own_data_ytest))
-                    FL_acc_global_data_maroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='macro', labels=np.unique(y_global))
+                    FL_acc_own_data_maroc[i] = roc_auc_score(own_data_ytest, y_prob_own, multi_class='ovr', average='macro', labels=list(range(self.domY)))
+                    FL_acc_global_data_maroc[i] = roc_auc_score(y_global, y_prob_global, multi_class='ovr', average='macro', labels=list(range(self.domY)))
 
             else:
                 FL_acc_own_data_wf1[i] = np.nan
