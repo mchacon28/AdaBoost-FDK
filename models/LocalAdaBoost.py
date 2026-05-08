@@ -46,7 +46,7 @@ class LocalAdaBoost():
         self.model_weights = None
         self.models_dict = None
 
-    def fit(self, X_data, y_data):
+    def fit(self, X_data, y_data, domY=None):
         """
         Fit an AdaBoost ensemble model on X_data and y_data.
         Stores the model in the class, in:
@@ -62,8 +62,12 @@ class LocalAdaBoost():
         self.model_weights = np.zeros(self.n_estimators)
         self.models_dict = {}
 
-        self.domY = len(np.unique(y_data))
-        transform = OneHotEncoder(sparse_output=False)
+        if domY == None:
+            self.domY = len(np.unique(y_data))
+        else:
+            self.domY = domY
+
+        transform = OneHotEncoder(sparse_output=False, categories=[np.arange(self.domY)])
         transform.fit(y_data.reshape(-1, 1))
         self.transform = transform
 

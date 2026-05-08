@@ -45,9 +45,9 @@ from flex.pool.decorators import (
     evaluate_server_model,
     init_server_model,
 )
-from flextrees.utils import GlobalRandomForest
+from models.flex_GlobalRandomForest import GlobalRandomForest
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 max_depth = 8
 n_estimators = 10
@@ -150,63 +150,93 @@ def init_server_model_rf_no_pruning(config=None, *args, **kwargs):
 
 
 @evaluate_server_model
-def evaluate_global_rf_model2(server_flex_model, test_data, macro_f1=False, *args, **kwargs):
+def evaluate_global_rf_model2(server_flex_model, test_data, macro=False, *args, **kwargs):
     """
     Evaluate global model on the server with both locals and a global test set.
 
     Args:
         server_flex_model (FlexModel): Server Flex Model.
         test_data (ArrayLike): Array with the data to evaluate (both X and y)
-        macro_f1 (bool): Set it to True if f1-score macro average wants to be calculated in addition to weighted
+        macro (bool): Set it to True if f1-score and AUC macro average wants to be calculated in addition to weighted
             average. Set to False by default.
-    Return: tuple with 4 (or 6 if macro_f1 is set to True) values:
+    Return: tuple with 6 (or 10 if macro is set to True) values:
         - acc_global: Accuracy on the global test set
         - f1w_global: F1-score on the global test set (weighted average)
+        - AUCw_global: AUC on the global test set (weighted average)
         - acc_local: Average accuracy on the local tests set of every client
         - f1w_local: Average f1-score (weighted average) on the local tests set of every client
-        If macro_f1 is set to True, it also returns:
+        - AUCw_local: Average AUC (weighted average) on the local tests set of every client
+        If macro is set to True, it also returns:
             - f1ma_global (float): F1-score on the global test set (macro average)
+            - AUCma_global (float): AUC on the global test set (macro average)
             - f1ma_local (float): Average f1-score (macro average) on the local tests set of every client
+            - AUCma_local (float): Average AUC (macro average) on the local tests set of every client
     """
     test_dict, X_global_test, y_global_test = test_data
 
     preds_rf = server_flex_model['model'].predict(X_global_test)
+    preds_rf_proba = server_flex_model['model'].predict(X_global_test, soft=True, n_classes=len(np.unique(y_global_test)))
+
     acc_global, f1w_global = accuracy_score(y_global_test, preds_rf), \
         f1_score(y_global_test, preds_rf, labels=np.unique(y_global_test), average='weighted', zero_division=0.0)
-    if macro_f1:
+
+    if preds_rf_proba.shape[1] == 2:
+        preds_rf_proba = preds_rf_proba[:, 1]
+
+    AUCw_global = roc_auc_score(y_global_test, preds_rf_proba, multi_class='ovr', average='weighted', 
+                                labels=np.unique(y_global_test))
+
+    if macro:
         f1ma_global = f1_score(y_global_test, preds_rf, labels=np.unique(y_global_test), average='macro',
                                zero_division=0.0)
+        AUCma_global = roc_auc_score(y_global_test, preds_rf_proba, multi_class='ovr', average='macro', 
+                                labels=np.unique(y_global_test))
 
     n_clients = len(test_dict)
     f1w_scores = np.zeros(n_clients)
     acc_scores = np.zeros(n_clients)
+    AUCw_scores = np.zeros(n_clients)
 
-    if macro_f1:
+    if macro:
         f1ma_scores = np.zeros(n_clients)
+        AUCma_scores = np.zeros(n_clients)
 
     for i, (X_test_local, y_test_local) in enumerate(test_dict.values()):
         y_pred = server_flex_model['model'].predict(X_test_local)
+        y_pred_proba = server_flex_model['model'].predict(X_test_local, soft=True, n_classes=len(np.unique(y_global_test)))
+
+        if y_pred_proba.shape[1] == 2:
+            y_pred_proba = y_pred_proba[:, 1]
+
         acc_score = accuracy_score(y_test_local, y_pred)
-        f1w_score = f1_score(y_test_local, y_pred, labels=np.unique(y_test_local), average='weighted',
+        f1w_score = f1_score(y_test_local, y_pred, labels=np.unique(y_global_test), average='weighted',
                              zero_division=0.0)
+        AUCw_score = roc_auc_score(y_test_local, y_pred_proba, multi_class='ovr', average='weighted', 
+                                labels=np.unique(y_global_test))
+
         acc_scores[i] = acc_score
         f1w_scores[i] = f1w_score
+        AUCw_scores[i] = AUCw_score
 
-        if macro_f1:
-            f1ma_scores[i] = f1_score(y_test_local, y_pred, labels=np.unique(y_test_local), average='macro',
+        if macro:
+            f1ma_scores[i] = f1_score(y_test_local, y_pred, labels=np.unique(y_global_test), average='macro',
                              zero_division=0.0)
+            AUCma_scores[i] = roc_auc_score(y_test_local, y_pred_proba, multi_class='ovr', average='macro', 
+                                labels=np.unique(y_global_test))
 
     acc_local = acc_scores.mean()
     f1w_local = f1w_scores.mean()
+    AUCw_local = np.nanmean(AUCw_scores) 
 
-    if macro_f1:
+    if macro:
         f1ma_local = f1ma_scores.mean()
-        return acc_global, f1w_global, f1ma_global, acc_local, f1w_local, f1ma_local
+        AUCma_local = np.nanmean(AUCma_scores)
+        return acc_global, f1w_global, f1ma_global, AUCw_global, AUCma_global, acc_local, f1w_local, f1ma_local, AUCw_local, AUCma_local
     else:
-        return acc_global, f1w_global, acc_local, f1w_local
+        return acc_global, f1w_global, AUCw_global, acc_local, f1w_local, AUCw_local
 
 
-def FRF_eval(train_dict, test_dict, X_global_test, y_global_test, hyperparameters="ours", config=None,macro_f1=False):
+def FRF_eval(train_dict, test_dict, X_global_test, y_global_test, hyperparameters="ours", config=None,macro=False):
     """
     Trains and evaluates the FRF model
     
@@ -226,18 +256,22 @@ def FRF_eval(train_dict, test_dict, X_global_test, y_global_test, hyperparameter
             -'no_pruning': uses a max_depth of None and 100 estimators for each RF. 
             -'other': configurable config. follows the config given in the argument config.
         config (dict): ...
-        macro_f1 (bool): Set it to True if f1-score macro average wants to be calculated in addition to weighted
+        macro (bool): Set it to True if f1-score and AUC macro average wants to be calculated in addition to weighted
             average. Set to False by default.
          Note: train_dict and test_dict are automatically generated when initializing AdaBoostFDK.
 
-    Return: tuple with 4 (or 6 if macro_f1 is set to True) values:
+    Return: tuple with 6 (or 10 if macro_f1 is set to True) values:
         - acc_global: Accuracy on the global test set
         - f1w_global: F1-score on the global test set (weighted average)
+        - AUCw_global: AUC on the global test set (weighted average)
         - acc_local: Average accuracy on the local tests set of every client
         - f1w_local: Average f1-score (weighted average) on the local tests set of every client
-        If macro_f1 is set to True, it also returns:
+        - AUCw_local: Average AUC (weighted average) on the local tests set of every client
+        If macro is set to True, it also returns:
             - f1ma_global: F1-score on the global test set (macro average)
+            - AUCma_global: AUC on the global test set (macro average)
             - f1ma_local: Average f1-score (macro average) on the local tests set of every client
+            - AUCma_local: Average AUC (macro average) on the local tests set of every client
     """
 
     n_clients = len(train_dict)
@@ -323,7 +357,7 @@ def FRF_eval(train_dict, test_dict, X_global_test, y_global_test, hyperparameter
     aggregator.map(func=set_aggregated_trees_rf, dst_pool=pool.servers)
     server.map(func=deploy_server_model_rf, dst_pool=pool.clients)
     results = server.map(func=evaluate_global_rf_model2, test_data=(test_dict, X_global_test, y_global_test),
-                         macro_f1=macro_f1)
+                         macro=macro)
 
     # acc_global, f1w_global, acc_local, f1w_local = results[0]
     # return acc_global, f1w_global, acc_local, f1w_local
