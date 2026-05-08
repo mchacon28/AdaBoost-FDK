@@ -48,7 +48,9 @@ class AdaBoostFKD:
                  prediction_weights='only_server', client_weight_adj ='own',soft_predictions=False,temperature=1.0,T=10,
                 data_distribution='iid', distribution_param=None,
                  alpha_counter=3, random_state=0, adapt_client_weight=None, balanced_target_client_weight=False,
-                 sample_public_data=False, attack_simulation=0.0):
+                 sample_public_data=False, attack_simulation=0.0,
+                 backdoor_client_ratio=0.0, backdoor_local_poison_rate=0.0, backdoor_public_poison_rate=0.0,
+                 trigger_feature_idx=None, trigger_value=None, target_label=0):
         """
         Args:
             data (numpy.ndarray): A 2-d array representing all the clients' data.
@@ -106,6 +108,17 @@ class AdaBoostFKD:
             attack_simulation (float): Indicates which percentage of the clients is suppossed to attack the model, sending
                 random predictions to the server. By default, no client attempts to attack it. The attackers also identify
                 their models as well performing, and those of the rest of clients as the worst performance so far.
+            backdoor_client_ratio (float): Percentage (0.0 to 1.0) of clients that act as backdoor attackers.
+            backdoor_local_poison_rate (float): Percentage (0.0 to 1.0) of each malicious client's local
+                training data to poison with the backdoor trigger.
+            backdoor_public_poison_rate (float): Percentage (0.0 to 1.0) of the public_data to poison
+                with the backdoor trigger.
+            trigger_feature_idx (int or None): Column index in the dataset where the backdoor trigger
+                is inserted. If None, a stealthy feature is auto-selected from the data distribution.
+            trigger_value (float/int or None): Abnormal value injected into the trigger feature
+                (e.g. 9999.0). If None, a stealthy in-distribution value is auto-generated.
+            target_label (int/float): Target class the attacker wants the model to predict when the
+                trigger is present.
         """
         self.data = data
         self.targets = targets
@@ -131,8 +144,23 @@ class AdaBoostFKD:
         self.domY = len(self.target_values)  #Axis=0 works for OneHot and for 1d array
         self.sample_public_data = sample_public_data
    
-        # Choose who are the attackers to the model
+        # Choose who are the attackers to the model (untargeted attack)
         self.attackers = random.sample(list(range(n_clients)), int(attack_simulation*n_clients))
+
+        # --- Targeted Backdoor Attack parameters ---
+        self.backdoor_client_ratio = backdoor_client_ratio
+        self.backdoor_local_poison_rate = backdoor_local_poison_rate
+        self.backdoor_public_poison_rate = backdoor_public_poison_rate
+        self.trigger_feature_idx = trigger_feature_idx
+        self.trigger_value = trigger_value
+        self.target_label = target_label
+
+        # Select backdoor attackers independently from untargeted attackers
+        eligible_for_backdoor = [c for c in range(n_clients) if c not in self.attackers]
+        n_backdoor = int(backdoor_client_ratio * n_clients)
+        if n_backdoor > len(eligible_for_backdoor):
+            n_backdoor = len(eligible_for_backdoor)
+        self.backdoor_attackers = random.sample(eligible_for_backdoor, n_backdoor)
 
         self.initialize_data()
         if prediction_weights == 'server_and_clients':
@@ -142,6 +170,57 @@ class AdaBoostFKD:
                 self.adapt_client_weight = adapt_client_weight
             if self.balanced_target_client_weight:
                 self.adapt_client_weight = self.adapt_client_weight * self.balanced_data_constant
+
+    def _generate_stealthy_trigger(self, X):
+        """
+        Analyzes the data distribution and generates a stealthy, in-distribution
+        trigger feature index and value.
+
+        Uses a heuristic to classify each feature as categorical (≤20 unique values)
+        or continuous (>20 unique values), then:
+          - Categorical: selects a rare but valid category from the bottom 25% of frequencies.
+          - Continuous: uses the 95th percentile as an extreme but statistically valid outlier.
+
+        Args:
+            X (numpy.ndarray): 2-d array of feature data (without the sample weights column).
+
+        Returns:
+            selected_col (int): The chosen feature column index.
+            trigger_value (float/int): The calculated stealthy trigger value.
+            feature_type (str): 'categorical' or 'continuous', for logging purposes.
+        """
+        rng = np.random.RandomState(self.random_state)
+        n_features = X.shape[1]
+        selected_col = rng.randint(0, n_features)
+
+        unique_vals, counts = np.unique(X[:, selected_col], return_counts=True)
+
+        if len(unique_vals) <= 20:
+            # --- Categorical heuristic ---
+            feature_type = 'categorical'
+            # Sort by frequency ascending
+            sorted_order = np.argsort(counts)
+            sorted_vals = unique_vals[sorted_order]
+            sorted_counts = counts[sorted_order]
+
+            # Bottom 25% of the frequency distribution (at least 1 candidate)
+            n_bottom = max(1, len(sorted_vals) // 4)
+            candidates = sorted_vals[:n_bottom]
+            candidate_counts = sorted_counts[:n_bottom]
+
+            # Pick among candidates that actually appear (count > 0)
+            valid_mask = candidate_counts > 0
+            if valid_mask.any():
+                trigger_value = rng.choice(candidates[valid_mask])
+            else:
+                # Fallback: pick the rarest value overall
+                trigger_value = sorted_vals[0]
+        else:
+            # --- Continuous heuristic ---
+            feature_type = 'continuous'
+            trigger_value = float(np.percentile(X[:, selected_col], 95))
+
+        return selected_col, trigger_value, feature_type
 
     def initialize_data(self):
         """
@@ -237,6 +316,60 @@ class AdaBoostFKD:
         self.number_data_clients = number_data_clients
         self.number_total_train_data = (number_data_clients.sum())
         self.balanced_data_constant = balanced_data_constant
+
+        # --- Auto-generate stealthy trigger if not explicitly provided ---
+        if len(self.backdoor_attackers) > 0 and (self.trigger_feature_idx is None or self.trigger_value is None):
+            auto_idx, auto_val, feature_type = self._generate_stealthy_trigger(self.data[:, :-1])
+            if self.trigger_feature_idx is None:
+                self.trigger_feature_idx = auto_idx
+            if self.trigger_value is None:
+                self.trigger_value = auto_val
+            print(f"[Stealth Trigger] Auto-selected feature {self.trigger_feature_idx} "
+                  f"(type: {feature_type}), trigger value: {self.trigger_value}")
+
+        # --- Inject backdoor into local training data of backdoor attackers ---
+        self.active_attackers_count = 0
+        self.total_poisoned_rows = 0
+        for j in self.backdoor_attackers:
+            X_train, y_train = self.train_clients_data[j]
+            # Only poison instances whose true label differs from target_label
+            eligible_indices = np.where(y_train != self.target_label)[0]
+            num_poison = int(len(X_train) * self.backdoor_local_poison_rate)
+            # Cap to the number of eligible (non-target-label) instances
+            actual_num_poison = min(num_poison, len(eligible_indices))
+            if actual_num_poison > 0:
+                self.active_attackers_count += 1
+                self.total_poisoned_rows += actual_num_poison
+                rng = np.random.RandomState(self.random_state + j)
+                selected_indices = rng.choice(eligible_indices, size=actual_num_poison, replace=False)
+                # trigger_feature_idx refers to the original feature columns;
+                # the weight column was appended as the last column, so the
+                # original feature indices are still valid.
+                X_train[selected_indices, self.trigger_feature_idx] = self.trigger_value
+                y_train[selected_indices] = self.target_label
+                self.train_clients_data[j] = (X_train, y_train)
+
+        # --- Inject backdoor into public data ---
+        num_poison_public = int(len(self.public_data) * self.backdoor_public_poison_rate)
+        if num_poison_public > 0:
+            rng_pub = np.random.RandomState(self.random_state + self.n_clients + 1)
+            selected_public_indices = rng_pub.choice(len(self.public_data), size=num_poison_public, replace=False)
+            self.public_data[selected_public_indices, self.trigger_feature_idx] = self.trigger_value
+
+        # --- Backdoor audit summary ---
+        self.backdoor_audit = {
+            'designated_attackers': len(self.backdoor_attackers),
+            'active_attackers': self.active_attackers_count,
+            'total_poisoned_rows': self.total_poisoned_rows,
+            'public_poisoned_rows': num_poison_public,
+            'configured_local_rate': self.backdoor_local_poison_rate,
+            'configured_public_rate': self.backdoor_public_poison_rate,
+        }
+        if len(self.backdoor_attackers) > 0:
+            print(f"[Backdoor Audit] Designated attackers: {self.backdoor_audit['designated_attackers']}, "
+                  f"Active (actually poisoned): {self.active_attackers_count}, "
+                  f"Total local rows poisoned: {self.total_poisoned_rows}, "
+                  f"Public rows poisoned: {num_poison_public}")
 
         # OneHotEncoder for weighted predictions
         transform = OneHotEncoder(sparse_output=False)
@@ -1114,3 +1247,52 @@ class AdaBoostFKD:
             return acc_global, f1w_global, f1ma_global, rocw_global, rocma_global, acc_local, f1w_local, f1ma_local, rocw_local, rocma_local
         else:
             return acc_global, f1w_global, rocw_global, acc_local, f1w_local, rocw_local
+
+    def calculate_asr(self, X_global, y_global):
+        """
+        Calculate the Attack Success Rate (ASR) of the targeted backdoor attack.
+
+        Creates a copy of X_global, injects the trigger_value into trigger_feature_idx
+        for every instance, then evaluates the global federated model on this fully-triggered
+        dataset. The ASR is the percentage of instances that the model incorrectly classifies
+        as the target_label.
+
+        Args:
+            X_global (np.array): 2-d array representing the global test data features.
+            y_global (np.array): 1-d array representing X_global true labels.
+
+        Returns:
+            asr (float): Attack Success Rate — fraction of triggered instances predicted
+                as target_label (range 0.0 to 1.0).
+        """
+        # No backdoor attack configured — ASR is trivially 0
+        #if (len(self.backdoor_attackers) == 0 or
+        if self.trigger_feature_idx is None or self.trigger_value is None:
+            return 0.0
+
+        # Only evaluate on instances whose true label is NOT the target_label,
+        # since triggering those would not constitute a successful "flip".
+        non_target_mask = (y_global != self.target_label)
+        X_eval = X_global[non_target_mask].copy()
+
+        if len(X_eval) == 0:
+            # No instances to evaluate — ASR is undefined
+            return 0.0
+
+        # Inject the trigger into every instance
+        X_eval[:, self.trigger_feature_idx] = self.trigger_value
+
+        # Get predictions from the global federated model on triggered data
+        all_predictions = self.global_predict_data(X_eval)  # shape: (n_clients, n_samples)
+
+        # Use majority vote across clients to get the final prediction per sample
+        n_samples = all_predictions.shape[1]
+        final_predictions = np.zeros(n_samples)
+        for s in range(n_samples):
+            unique, counts = np.unique(all_predictions[:, s], return_counts=True)
+            final_predictions[s] = unique[np.argmax(counts)]
+
+        # ASR = fraction of non-target instances predicted as target_label
+        asr = np.mean(final_predictions == self.target_label)
+
+        return asr
