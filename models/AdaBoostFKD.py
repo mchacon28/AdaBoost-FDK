@@ -50,7 +50,8 @@ class AdaBoostFKD:
                  alpha_counter=3, random_state=0, adapt_client_weight=None, balanced_target_client_weight=False,
                  sample_public_data=False, attack_simulation=0.0,
                  backdoor_client_ratio=0.0, backdoor_local_poison_rate=0.0, backdoor_public_poison_rate=0.0,
-                 trigger_feature_idx=None, trigger_value=None, target_label=0):
+                 trigger_feature_idx=None, trigger_value=None, target_label=0,
+                 dp_noise_scale=0.0):
         """
         Args:
             data (numpy.ndarray): A 2-d array representing all the clients' data.
@@ -119,6 +120,8 @@ class AdaBoostFKD:
                 (e.g. 9999.0). If None, a stealthy in-distribution value is auto-generated.
             target_label (int/float): Target class the attacker wants the model to predict when the
                 trigger is present.
+            dp_noise_scale (float): Scale parameter (λ) for the Laplacian noise added to the
+                hard-label vote counts in the DP-PATE mechanism. A value of 0.0 disables DP.
         """
         self.data = data
         self.targets = targets
@@ -143,6 +146,7 @@ class AdaBoostFKD:
         self.balanced_target_client_weight = balanced_target_client_weight
         self.domY = len(self.target_values)  #Axis=0 works for OneHot and for 1d array
         self.sample_public_data = sample_public_data
+        self.dp_noise_scale = dp_noise_scale
    
         # Choose who are the attackers to the model (untargeted attack)
         self.attackers = random.sample(list(range(n_clients)), int(attack_simulation*n_clients))
@@ -418,27 +422,33 @@ class AdaBoostFKD:
                 average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
 
         else:
-            # Original hard label logic
-            #arr has shape (n_clients, n_samples)
-            average_public_data_predict = np.zeros(arr.shape[1])
+            # Hard label logic with unified vote matrix (DP-PATE compatible)
+            # arr has shape (n_clients, n_samples)
+            n_samples = arr.shape[1]
 
-            if self.public_data_prediction == 'majority_voting':
-                for i in range(arr.shape[1]):
-                    unique, counts = np.unique(arr[:, i], return_counts=True)
-                    average_public_data_predict[i] = unique[np.argmax(counts)]
-                    # If two predictions were voted the same number of times it takes the one with smaller index
+            # Step A: Initialize vote matrix over all classes
+            vote_counts = np.zeros((n_samples, self.domY))
 
-            elif self.public_data_prediction == 'weighted_majority_voting':
-                weighted_sum = np.zeros((arr.shape[1], self.domY))
-                for i in range(self.n_clients):
-                    one_hot_prediction = self.transform.transform(arr[i].reshape(-1, 1))
-                    weighted_sum = weighted_sum + (
-                            one_hot_prediction * self.number_data_clients[i]) / self.number_total_train_data
+            # Step B: Accumulate votes
+            for i in range(self.n_clients):
+                one_hot_prediction = self.transform.transform(arr[i].reshape(-1, 1))
+                if self.public_data_prediction == 'majority_voting':
+                    vote_counts += one_hot_prediction
+                elif self.public_data_prediction == 'weighted_majority_voting':
+                    client_weight = self.number_data_clients[i] / self.number_total_train_data
+                    vote_counts += one_hot_prediction * client_weight
 
-                predicted_indices = weighted_sum.argmax(axis=1)
-                predicted_labels = np.zeros((arr.shape[1], self.domY))
-                predicted_labels[np.arange(arr.shape[1]), predicted_indices] = 1
-                average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
+            # Step C: Inject Differential Privacy noise (Laplacian)
+            if self.dp_noise_scale > 0:
+                noise = np.random.laplace(loc=0.0, scale=self.dp_noise_scale,
+                                          size=vote_counts.shape)
+                vote_counts += noise
+
+            # Step D: Determine winners
+            predicted_indices = vote_counts.argmax(axis=1)
+            predicted_labels = np.zeros((n_samples, self.domY))
+            predicted_labels[np.arange(n_samples), predicted_indices] = 1
+            average_public_data_predict = self.transform.inverse_transform(predicted_labels).flatten()
 
         return average_public_data_predict
     
